@@ -14,12 +14,16 @@ extern crate xdg;
 use std::process::{exit, Command, Stdio};
 use std::path::{Path, PathBuf};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::borrow::Borrow;
 
 use structopt::StructOpt;
 
 use toml::Value;
+
+extern crate termcolor;
+use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+
 
 #[derive(StructOpt, Debug)]
 #[structopt(
@@ -33,11 +37,11 @@ enum Opts {
         remote: Option<String>,
 
         #[structopt(
-            short = "c",
-            long = "copy-back",
-            help = "transfer the target folder back to the local machine"
+            short = "nc",
+            long = "no-copy-back",
+            help = "do not transfer the target folder back to the local machine"
         )]
-        copy_back: bool,
+        no_copy_back: bool,
 
         #[structopt(
             long = "manifest-path",
@@ -80,17 +84,27 @@ fn config_from_file(config_path: &Path) -> Option<Value> {
     })
 }
 
+fn print_green(stream: &mut StandardStream, prefix: &str, description: &str) {
+    stream.set_color(ColorSpec::new().set_fg(Some(Color::Green)).set_bold(true)).unwrap();
+    write!(stream, "{}", prefix).unwrap();
+    stream.set_color(&ColorSpec::new()).unwrap();
+    writeln!(stream, "{}", description).unwrap();
+}
+
 fn main() {
     simple_logger::init().unwrap();
 
     let Opts::Remote{
         remote,
-        copy_back,
+        no_copy_back,
         manifest_path,
         hidden,
         command,
         options
     } = Opts::from_args();
+
+
+    let mut stdout = StandardStream::stdout(ColorChoice::Always);
 
     let manifest_path = manifest_path.as_ref().map(PathBuf::borrow);
     let project_metadata = cargo_metadata::metadata(manifest_path)
@@ -135,12 +149,10 @@ fn main() {
         exit(-3);
     });
 
-    info!("Transferring sources to build server.");
     // transfer project to build server
     let mut rsync_to = Command::new("rsync");
     rsync_to.arg("-a".to_owned())
         .arg("--delete")
-        .arg("--info=progress2")
         .arg("--exclude")
         .arg("target");
 
@@ -148,6 +160,8 @@ fn main() {
         rsync_to.arg("--exclude")
             .arg(".*");
     }
+
+    print_green(&mut stdout, "    Transfer", " copy source to remote");
 
     rsync_to.arg("--rsync-path")
         .arg("mkdir -p remote-builds && rsync")
@@ -172,8 +186,9 @@ fn main() {
         )
     );
 
-    info!("Starting build process.");
     Command::new("ssh")
+        .arg("-t")
+        .arg("-oLogLevel=QUIET")
         .arg(&build_server)
         .arg(build_command)
         .stdout(Stdio::inherit())
@@ -185,13 +200,13 @@ fn main() {
             exit(-5);
         });
 
-    if copy_back {
-        info!("Transferring artifacts back to client.");
+    if !no_copy_back {
+        print_green(&mut stdout, "    Transfer", " copy artifacts from remote");
+
         Command::new("rsync")
             .arg("-a")
             .arg("--delete")
             .arg("--compress")
-            .arg("--info=progress2")
             .arg(format!("{}:~/remote-builds/{}/target/", build_server, project_name))
             .arg(format!("{}/target/", project_dir.to_string_lossy()))
             .stdout(Stdio::inherit())
